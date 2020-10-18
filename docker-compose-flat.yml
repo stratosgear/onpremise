@@ -1,0 +1,430 @@
+services:
+  clickhouse:
+    environment:
+      MAX_MEMORY_USAGE_RATIO: 0.3
+    image: yandex/clickhouse-server:20.3.9.70
+    restart: unless-stopped
+    ulimits:
+      nofile:
+        hard: 262144
+        soft: 262144
+    volumes:
+    - sentry-clickhouse:/var/lib/clickhouse:rw
+    - sentry-clickhouse-log:/var/log/clickhouse-server:rw
+    - read_only: true
+      source: /mnt/data/projects/sources/sentry-onpremise/clickhouse/config.xml
+      target: /etc/clickhouse-server/config.d/sentry.xml
+      type: bind
+  cron:
+    build:
+      args:
+        SENTRY_IMAGE: getsentry/sentry:nightly
+        SENTRY_PYTHON3: ''
+      context: /mnt/data/projects/sources/sentry-onpremise/sentry
+    command: run cron
+    depends_on:
+    - kafka
+    - memcached
+    - postgres
+    - redis
+    - smtp
+    - snuba-api
+    - snuba-consumer
+    - snuba-outcomes-consumer
+    - snuba-replacer
+    - snuba-sessions-consumer
+    - snuba-transactions-consumer
+    - symbolicator
+    environment:
+      SENTRY_CONF: /etc/sentry
+      SNUBA: http://snuba-api:1218
+    image: sentry-onpremise-local
+    restart: unless-stopped
+    volumes:
+    - sentry-data:/data:rw
+    - /mnt/data/projects/sources/sentry-onpremise/sentry:/etc/sentry:rw
+  ingest-consumer:
+    build:
+      args:
+        SENTRY_IMAGE: getsentry/sentry:nightly
+        SENTRY_PYTHON3: ''
+      context: /mnt/data/projects/sources/sentry-onpremise/sentry
+    command: run ingest-consumer --all-consumer-types
+    depends_on:
+    - kafka
+    - memcached
+    - postgres
+    - redis
+    - smtp
+    - snuba-api
+    - snuba-consumer
+    - snuba-outcomes-consumer
+    - snuba-replacer
+    - snuba-sessions-consumer
+    - snuba-transactions-consumer
+    - symbolicator
+    environment:
+      SENTRY_CONF: /etc/sentry
+      SNUBA: http://snuba-api:1218
+    image: sentry-onpremise-local
+    restart: unless-stopped
+    volumes:
+    - sentry-data:/data:rw
+    - /mnt/data/projects/sources/sentry-onpremise/sentry:/etc/sentry:rw
+  kafka:
+    depends_on:
+    - zookeeper
+    environment:
+      CONFLUENT_SUPPORT_METRICS_ENABLE: "false"
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LOG4J_LOGGERS: kafka.cluster=WARN,kafka.controller=WARN,kafka.coordinator=WARN,kafka.log=WARN,kafka.server=WARN,kafka.zookeeper=WARN,state.change.logger=WARN
+      KAFKA_LOG4J_ROOT_LOGLEVEL: WARN
+      KAFKA_LOG_RETENTION_HOURS: '24'
+      KAFKA_MAX_REQUEST_SIZE: '50000000'
+      KAFKA_MESSAGE_MAX_BYTES: '50000000'
+      KAFKA_OFFSETS_TOPIC_NUM_PARTITIONS: '1'
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: '1'
+      KAFKA_TOOLS_LOG4J_LOGLEVEL: WARN
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+    image: confluentinc/cp-kafka:5.5.0
+    restart: unless-stopped
+    volumes:
+    - sentry-kafka:/var/lib/kafka/data:rw
+    - sentry-kafka-log:/var/lib/kafka/log:rw
+    - sentry-secrets:/etc/kafka/secrets:rw
+  memcached:
+    image: memcached:1.5-alpine
+    restart: unless-stopped
+  nginx:
+    depends_on:
+    - relay
+    - web
+    image: nginx:1.16
+    ports:
+    - protocol: tcp
+      published: 9000
+      target: 80
+    restart: unless-stopped
+    volumes:
+    - read_only: true
+      source: /mnt/data/projects/sources/sentry-onpremise/nginx
+      target: /etc/nginx
+      type: bind
+  post-process-forwarder:
+    build:
+      args:
+        SENTRY_IMAGE: getsentry/sentry:nightly
+        SENTRY_PYTHON3: ''
+      context: /mnt/data/projects/sources/sentry-onpremise/sentry
+    command: run post-process-forwarder --commit-batch-size 1
+    depends_on:
+    - kafka
+    - memcached
+    - postgres
+    - redis
+    - smtp
+    - snuba-api
+    - snuba-consumer
+    - snuba-outcomes-consumer
+    - snuba-replacer
+    - snuba-sessions-consumer
+    - snuba-transactions-consumer
+    - symbolicator
+    environment:
+      SENTRY_CONF: /etc/sentry
+      SNUBA: http://snuba-api:1218
+    image: sentry-onpremise-local
+    restart: unless-stopped
+    volumes:
+    - sentry-data:/data:rw
+    - /mnt/data/projects/sources/sentry-onpremise/sentry:/etc/sentry:rw
+  postgres:
+    environment:
+      POSTGRES_HOST_AUTH_METHOD: trust
+    image: postgres:9.6
+    restart: unless-stopped
+    volumes:
+    - sentry-postgres:/var/lib/postgresql/data:rw
+  redis:
+    image: redis:5.0-alpine
+    restart: unless-stopped
+    ulimits:
+      nofile:
+        hard: 10032
+        soft: 10032
+    volumes:
+    - sentry-redis:/data:rw
+  relay:
+    depends_on:
+    - kafka
+    - redis
+    image: getsentry/relay:nightly
+    restart: unless-stopped
+    volumes:
+    - read_only: true
+      source: /mnt/data/projects/sources/sentry-onpremise/relay
+      target: /work/.relay
+      type: bind
+  sentry-cleanup:
+    build:
+      args:
+        BASE_IMAGE: sentry-onpremise-local
+      context: /mnt/data/projects/sources/sentry-onpremise/cron
+    command: '"0 0 * * * gosu sentry sentry cleanup --days 90"'
+    depends_on:
+    - kafka
+    - memcached
+    - postgres
+    - redis
+    - smtp
+    - snuba-api
+    - snuba-consumer
+    - snuba-outcomes-consumer
+    - snuba-replacer
+    - snuba-sessions-consumer
+    - snuba-transactions-consumer
+    - symbolicator
+    environment:
+      SENTRY_CONF: /etc/sentry
+      SNUBA: http://snuba-api:1218
+    image: sentry-cleanup-onpremise-local
+    restart: unless-stopped
+    volumes:
+    - sentry-data:/data:rw
+    - /mnt/data/projects/sources/sentry-onpremise/sentry:/etc/sentry:rw
+  smtp:
+    image: tianon/exim4
+    restart: unless-stopped
+    volumes:
+    - sentry-smtp:/var/spool/exim4:rw
+    - sentry-smtp-log:/var/log/exim4:rw
+  snuba-api:
+    depends_on:
+    - clickhouse
+    - kafka
+    - redis
+    environment:
+      CLICKHOUSE_HOST: clickhouse
+      DEFAULT_BROKERS: kafka:9092
+      REDIS_HOST: redis
+      SNUBA_SETTINGS: docker
+      UWSGI_DISABLE_LOGGING: "true"
+      UWSGI_MAX_REQUESTS: '10000'
+    image: getsentry/snuba:nightly
+    restart: unless-stopped
+  snuba-cleanup:
+    build:
+      args:
+        BASE_IMAGE: getsentry/snuba:nightly
+      context: /mnt/data/projects/sources/sentry-onpremise/cron
+    command: '"*/5 * * * * gosu snuba snuba cleanup --dry-run False"'
+    depends_on:
+    - clickhouse
+    - kafka
+    - redis
+    environment:
+      CLICKHOUSE_HOST: clickhouse
+      DEFAULT_BROKERS: kafka:9092
+      REDIS_HOST: redis
+      SNUBA_SETTINGS: docker
+      UWSGI_DISABLE_LOGGING: "true"
+      UWSGI_MAX_REQUESTS: '10000'
+    image: snuba-cleanup-onpremise-local
+    restart: unless-stopped
+  snuba-consumer:
+    command: consumer --storage events --auto-offset-reset=latest --max-batch-time-ms
+      750
+    depends_on:
+    - clickhouse
+    - kafka
+    - redis
+    environment:
+      CLICKHOUSE_HOST: clickhouse
+      DEFAULT_BROKERS: kafka:9092
+      REDIS_HOST: redis
+      SNUBA_SETTINGS: docker
+      UWSGI_DISABLE_LOGGING: "true"
+      UWSGI_MAX_REQUESTS: '10000'
+    image: getsentry/snuba:nightly
+    restart: unless-stopped
+  snuba-outcomes-consumer:
+    command: consumer --storage outcomes_raw --auto-offset-reset=earliest --max-batch-time-ms
+      750
+    depends_on:
+    - clickhouse
+    - kafka
+    - redis
+    environment:
+      CLICKHOUSE_HOST: clickhouse
+      DEFAULT_BROKERS: kafka:9092
+      REDIS_HOST: redis
+      SNUBA_SETTINGS: docker
+      UWSGI_DISABLE_LOGGING: "true"
+      UWSGI_MAX_REQUESTS: '10000'
+    image: getsentry/snuba:nightly
+    restart: unless-stopped
+  snuba-replacer:
+    command: replacer --storage events --auto-offset-reset=latest --max-batch-size
+      3
+    depends_on:
+    - clickhouse
+    - kafka
+    - redis
+    environment:
+      CLICKHOUSE_HOST: clickhouse
+      DEFAULT_BROKERS: kafka:9092
+      REDIS_HOST: redis
+      SNUBA_SETTINGS: docker
+      UWSGI_DISABLE_LOGGING: "true"
+      UWSGI_MAX_REQUESTS: '10000'
+    image: getsentry/snuba:nightly
+    restart: unless-stopped
+  snuba-sessions-consumer:
+    command: consumer --storage sessions_raw --auto-offset-reset=latest --max-batch-time-ms
+      750
+    depends_on:
+    - clickhouse
+    - kafka
+    - redis
+    environment:
+      CLICKHOUSE_HOST: clickhouse
+      DEFAULT_BROKERS: kafka:9092
+      REDIS_HOST: redis
+      SNUBA_SETTINGS: docker
+      UWSGI_DISABLE_LOGGING: "true"
+      UWSGI_MAX_REQUESTS: '10000'
+    image: getsentry/snuba:nightly
+    restart: unless-stopped
+  snuba-transactions-consumer:
+    command: consumer --storage transactions --consumer-group transactions_group --auto-offset-reset=latest
+      --max-batch-time-ms 750
+    depends_on:
+    - clickhouse
+    - kafka
+    - redis
+    environment:
+      CLICKHOUSE_HOST: clickhouse
+      DEFAULT_BROKERS: kafka:9092
+      REDIS_HOST: redis
+      SNUBA_SETTINGS: docker
+      UWSGI_DISABLE_LOGGING: "true"
+      UWSGI_MAX_REQUESTS: '10000'
+    image: getsentry/snuba:nightly
+    restart: unless-stopped
+  symbolicator:
+    command: run -c /etc/symbolicator/config.yml
+    image: getsentry/symbolicator:nightly
+    restart: unless-stopped
+    volumes:
+    - sentry-symbolicator:/data:rw
+    - read_only: true
+      source: /mnt/data/projects/sources/sentry-onpremise/symbolicator
+      target: /etc/symbolicator
+      type: bind
+  symbolicator-cleanup:
+    build:
+      args:
+        BASE_IMAGE: getsentry/symbolicator:nightly
+      context: /mnt/data/projects/sources/sentry-onpremise/cron
+    command: '"55 23 * * * gosu symbolicator symbolicator cleanup"'
+    image: symbolicator-cleanup-onpremise-local
+    restart: unless-stopped
+    volumes:
+    - sentry-symbolicator:/data:rw
+  web:
+    build:
+      args:
+        SENTRY_IMAGE: getsentry/sentry:nightly
+        SENTRY_PYTHON3: ''
+      context: /mnt/data/projects/sources/sentry-onpremise/sentry
+    depends_on:
+    - kafka
+    - memcached
+    - postgres
+    - redis
+    - smtp
+    - snuba-api
+    - snuba-consumer
+    - snuba-outcomes-consumer
+    - snuba-replacer
+    - snuba-sessions-consumer
+    - snuba-transactions-consumer
+    - symbolicator
+    environment:
+      SENTRY_CONF: /etc/sentry
+      SNUBA: http://snuba-api:1218
+    image: sentry-onpremise-local
+    restart: unless-stopped
+    volumes:
+    - sentry-data:/data:rw
+    - /mnt/data/projects/sources/sentry-onpremise/sentry:/etc/sentry:rw
+  worker:
+    build:
+      args:
+        SENTRY_IMAGE: getsentry/sentry:nightly
+        SENTRY_PYTHON3: ''
+      context: /mnt/data/projects/sources/sentry-onpremise/sentry
+    command: run worker
+    depends_on:
+    - kafka
+    - memcached
+    - postgres
+    - redis
+    - smtp
+    - snuba-api
+    - snuba-consumer
+    - snuba-outcomes-consumer
+    - snuba-replacer
+    - snuba-sessions-consumer
+    - snuba-transactions-consumer
+    - symbolicator
+    environment:
+      SENTRY_CONF: /etc/sentry
+      SNUBA: http://snuba-api:1218
+    image: sentry-onpremise-local
+    restart: unless-stopped
+    volumes:
+    - sentry-data:/data:rw
+    - /mnt/data/projects/sources/sentry-onpremise/sentry:/etc/sentry:rw
+  zookeeper:
+    environment:
+      CONFLUENT_SUPPORT_METRICS_ENABLE: "false"
+      ZOOKEEPER_CLIENT_PORT: '2181'
+      ZOOKEEPER_LOG4J_ROOT_LOGLEVEL: WARN
+      ZOOKEEPER_TOOLS_LOG4J_LOGLEVEL: WARN
+    image: confluentinc/cp-zookeeper:5.5.0
+    restart: unless-stopped
+    volumes:
+    - sentry-zookeeper:/var/lib/zookeeper/data:rw
+    - sentry-zookeeper-log:/var/lib/zookeeper/log:rw
+    - sentry-secrets:/etc/zookeeper/secrets:rw
+version: '3.4'
+volumes:
+  sentry-clickhouse:
+    external: true
+    name: sentry-clickhouse
+  sentry-clickhouse-log: {}
+  sentry-data:
+    external: true
+    name: sentry-data
+  sentry-kafka:
+    external: true
+    name: sentry-kafka
+  sentry-kafka-log: {}
+  sentry-postgres:
+    external: true
+    name: sentry-postgres
+  sentry-redis:
+    external: true
+    name: sentry-redis
+  sentry-secrets: {}
+  sentry-smtp: {}
+  sentry-smtp-log: {}
+  sentry-symbolicator:
+    external: true
+    name: sentry-symbolicator
+  sentry-zookeeper:
+    external: true
+    name: sentry-zookeeper
+  sentry-zookeeper-log: {}
+

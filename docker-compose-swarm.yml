@@ -1,0 +1,328 @@
+version: "3.4"
+
+services:
+  clickhouse:
+    environment:
+      MAX_MEMORY_USAGE_RATIO: 0.3
+    image: yandex/clickhouse-server:20.3.9.70
+    networks:
+      - default
+    # ulimits:
+    #   nofile:
+    #     hard: 262144
+    #     soft: 262144
+    volumes:
+      - sentry-clickhouse:/var/lib/clickhouse:rw
+      - sentry-clickhouse-log:/var/log/clickhouse-server:rw
+      - /data/sources/sentry-onpremise/clickhouse/config.xml:/etc/clickhouse-server/config.d/sentry.xml
+
+  cron:
+    command: run cron
+    environment:
+      SENTRY_CONF: /etc/sentry
+      SNUBA: http://snuba-api:1218
+    image: sentry-onpremise-local
+    volumes:
+      - sentry-data:/data:rw
+      - /data/sources/sentry-onpremise/sentry:/etc/sentry:rw
+
+  ingest-consumer:
+    command: run ingest-consumer --all-consumer-types
+    environment:
+      SENTRY_REDIS_HOST: redis
+      SENTRY_CONF: /etc/sentry
+      SNUBA: http://snuba-api:1218
+    image: sentry-onpremise-local
+    networks:
+      - default
+    volumes:
+      - sentry-data:/data:rw
+
+  kafka:
+    environment:
+      CONFLUENT_SUPPORT_METRICS_ENABLE: "false"
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LOG4J_LOGGERS: kafka.cluster=WARN,kafka.controller=WARN,kafka.coordinator=WARN,kafka.log=WARN,kafka.server=WARN,kafka.zookeeper=WARN,state.change.logger=WARN
+      KAFKA_LOG4J_ROOT_LOGLEVEL: WARN
+      KAFKA_LOG_RETENTION_HOURS: "24"
+      KAFKA_MAX_REQUEST_SIZE: "50000000"
+      KAFKA_MESSAGE_MAX_BYTES: "50000000"
+      KAFKA_OFFSETS_TOPIC_NUM_PARTITIONS: "1"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TOOLS_LOG4J_LOGLEVEL: WARN
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+    image: confluentinc/cp-kafka:5.5.0
+    networks:
+      - default
+    volumes:
+      - sentry-kafka:/var/lib/kafka/data:rw
+      - sentry-kafka-log:/var/lib/kafka/log:rw
+      - sentry-secrets:/etc/kafka/secrets:rw
+
+  memcached:
+    image: memcached:1.5-alpine
+    networks:
+      - default
+
+  nginx:
+    image: nginx:1.16
+    ports:
+      - protocol: tcp
+        published: 9000
+        target: 80
+    volumes:
+      - /data/sources/sentry-onpremise/nginx:/etc/nginx
+    networks:
+      - traefik-public
+      - default
+    deploy:
+      labels:
+        traefik.docker.network: traefik-public
+        traefik.enable: "true"
+        traefik.http.routers.sentry.entrypoints: websecure
+        traefik.http.routers.sentry.rule: Host(`sentry.hypervasis.com`)
+        traefik.http.routers.sentry.tls.certresolver: letsencryptresolver
+        traefik.http.services.sentry.loadbalancer.server.port: "80"
+
+  post-process-forwarder:
+    command: run post-process-forwarder --commit-batch-size 1
+    environment:
+      SENTRY_CONF: /etc/sentry
+      SNUBA: http://snuba-api:1218
+    image: sentry-onpremise-local
+    networks:
+      - default
+    volumes:
+      - sentry-data:/data:rw
+      - /data/sources/sentry-onpremise/sentry:/etc/sentry:rw
+
+  postgres:
+    environment:
+      POSTGRES_HOST_AUTH_METHOD: trust
+    image: postgres:9.6
+    networks:
+      - default
+    volumes:
+      - sentry-postgres:/var/lib/postgresql/data:rw
+
+  redis:
+    image: redis:5.0-alpine
+    networks:
+      - default
+    # ulimits:
+    #   nofile:
+    #     hard: 10032
+    #     soft: 10032
+    volumes:
+      - sentry-redis:/data:rw
+
+  relay:
+    image: getsentry/relay:nightly
+    networks:
+      - default
+    volumes:
+      - /data/sources/sentry-onpremise/relay:/work/.relay
+
+  sentry-cleanup:
+    command: '"0 0 * * * gosu sentry sentry cleanup --days 90"'
+    environment:
+      SENTRY_CONF: /etc/sentry
+      SNUBA: http://snuba-api:1218
+    image: sentry-cleanup-onpremise-local
+    volumes:
+      - sentry-data:/data:rw
+      - /data/sources/sentry-onpremise/sentry:/etc/sentry:rw
+
+  smtp:
+    image: tianon/exim4
+    networks:
+      - default
+    volumes:
+      - sentry-smtp:/var/spool/exim4:rw
+      - sentry-smtp-log:/var/log/exim4:rw
+
+  snuba-api:
+    environment:
+      CLICKHOUSE_HOST: clickhouse
+      DEFAULT_BROKERS: kafka:9092
+      REDIS_HOST: redis
+      SNUBA_SETTINGS: docker
+      UWSGI_DISABLE_LOGGING: "true"
+      UWSGI_MAX_REQUESTS: "10000"
+    image: getsentry/snuba:nightly
+    networks:
+      - default
+
+  snuba-cleanup:
+    command: '"*/5 * * * * gosu snuba snuba cleanup --dry-run False"'
+    environment:
+      CLICKHOUSE_HOST: clickhouse
+      DEFAULT_BROKERS: kafka:9092
+      REDIS_HOST: redis
+      SNUBA_SETTINGS: docker
+      UWSGI_DISABLE_LOGGING: "true"
+      UWSGI_MAX_REQUESTS: "10000"
+    image: snuba-cleanup-onpremise-local
+    networks:
+      - default
+
+  snuba-consumer:
+    command:
+      consumer --storage events --auto-offset-reset=latest --max-batch-time-ms
+      750
+    environment:
+      CLICKHOUSE_HOST: clickhouse
+      DEFAULT_BROKERS: kafka:9092
+      REDIS_HOST: redis
+      SNUBA_SETTINGS: docker
+      UWSGI_DISABLE_LOGGING: "true"
+      UWSGI_MAX_REQUESTS: "10000"
+    image: getsentry/snuba:nightly
+    networks:
+      - default
+
+  snuba-outcomes-consumer:
+    command:
+      consumer --storage outcomes_raw --auto-offset-reset=earliest --max-batch-time-ms
+      750
+    environment:
+      CLICKHOUSE_HOST: clickhouse
+      DEFAULT_BROKERS: kafka:9092
+      REDIS_HOST: redis
+      SNUBA_SETTINGS: docker
+      UWSGI_DISABLE_LOGGING: "true"
+      UWSGI_MAX_REQUESTS: "10000"
+    image: getsentry/snuba:nightly
+    networks:
+      - default
+
+  snuba-replacer:
+    command:
+      replacer --storage events --auto-offset-reset=latest --max-batch-size
+      3
+    environment:
+      CLICKHOUSE_HOST: clickhouse
+      DEFAULT_BROKERS: kafka:9092
+      REDIS_HOST: redis
+      SNUBA_SETTINGS: docker
+      UWSGI_DISABLE_LOGGING: "true"
+      UWSGI_MAX_REQUESTS: "10000"
+    image: getsentry/snuba:nightly
+    networks:
+      - default
+
+  snuba-sessions-consumer:
+    command:
+      consumer --storage sessions_raw --auto-offset-reset=latest --max-batch-time-ms
+      750
+    environment:
+      CLICKHOUSE_HOST: clickhouse
+      DEFAULT_BROKERS: kafka:9092
+      REDIS_HOST: redis
+      SNUBA_SETTINGS: docker
+      UWSGI_DISABLE_LOGGING: "true"
+      UWSGI_MAX_REQUESTS: "10000"
+    image: getsentry/snuba:nightly
+    networks:
+      - default
+
+  snuba-transactions-consumer:
+    command:
+      consumer --storage transactions --consumer-group transactions_group --auto-offset-reset=latest
+      --max-batch-time-ms 750
+    environment:
+      CLICKHOUSE_HOST: clickhouse
+      DEFAULT_BROKERS: kafka:9092
+      REDIS_HOST: redis
+      SNUBA_SETTINGS: docker
+      UWSGI_DISABLE_LOGGING: "true"
+      UWSGI_MAX_REQUESTS: "10000"
+    image: getsentry/snuba:nightly
+    networks:
+      - default
+
+  symbolicator:
+    command: run -c /etc/symbolicator/config.yml
+    image: getsentry/symbolicator:nightly
+    volumes:
+      - sentry-symbolicator:/data:rw
+      - /data/sources/sentry-onpremise/symbolicator:/etc/symbolicator
+    networks:
+      - default
+
+  symbolicator-cleanup:
+    command: '"55 23 * * * gosu symbolicator symbolicator cleanup"'
+    image: symbolicator-cleanup-onpremise-local
+    volumes:
+      - sentry-symbolicator:/data:rw
+    networks:
+      - default
+
+  web:
+    environment:
+      SENTRY_CONF: /etc/sentry
+      SNUBA: http://snuba-api:1218
+    image: sentry-onpremise-local
+    volumes:
+      - sentry-data:/data:rw
+      - /data/sources/sentry-onpremise/sentry:/etc/sentry:rw
+    networks:
+      - default
+
+  worker:
+    command: run worker
+    environment:
+      SENTRY_CONF: /etc/sentry
+      SNUBA: http://snuba-api:1218
+    image: sentry-onpremise-local
+    volumes:
+      - sentry-data:/data:rw
+      - /data/sources/sentry-onpremise/sentry:/etc/sentry:rw
+    networks:
+      - default
+
+  zookeeper:
+    environment:
+      CONFLUENT_SUPPORT_METRICS_ENABLE: "false"
+      ZOOKEEPER_CLIENT_PORT: "2181"
+      ZOOKEEPER_LOG4J_ROOT_LOGLEVEL: WARN
+      ZOOKEEPER_TOOLS_LOG4J_LOGLEVEL: WARN
+    image: confluentinc/cp-zookeeper:5.5.0
+    volumes:
+      - sentry-zookeeper:/var/lib/zookeeper/data:rw
+      - sentry-zookeeper-log:/var/lib/zookeeper/log:rw
+      - sentry-secrets:/etc/zookeeper/secrets:rw
+
+networks:
+  default:
+    driver: overlay
+  traefik-public:
+    external: true
+
+volumes:
+  sentry-clickhouse:
+    external: true
+  sentry-clickhouse-log:
+    external: true
+  sentry-data:
+    external: true
+  sentry-kafka:
+    external: true
+  sentry-kafka-log:
+    external: true
+  sentry-postgres:
+    external: true
+  sentry-redis:
+    external: true
+  sentry-secrets:
+    external: true
+  sentry-smtp:
+    external: true
+  sentry-smtp-log:
+    external: true
+  sentry-symbolicator:
+    external: true
+  sentry-zookeeper:
+    external: true
+  sentry-zookeeper-log:
+    external: true

@@ -1,0 +1,4 @@
+FROM sentry-onpremise-local
+
+COPY config.yml /etc/sentry
+COPY sentry.conf.py /etc/sentry
